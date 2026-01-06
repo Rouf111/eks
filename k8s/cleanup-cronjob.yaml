@@ -1,0 +1,42 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-test-jobs
+  namespace: eks-provisioner
+  labels:
+    app: eks-provisioner
+spec:
+  schedule: "0 */6 * * *"  # Run every 6 hours
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: cleanup-job
+        spec:
+          serviceAccountName: eks-provisioner
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  #!/bin/bash
+                  echo "Starting cleanup of old test job PVCs..."
+                  
+                  # Get all PVCs labeled for test operations older than 24h
+                  # This is a placeholder - actual implementation would need timestamps
+                  
+                  # Delete completed test jobs and their PVCs
+                  kubectl get jobs -n eks-provisioner -l operation=test --field-selector status.successful=1 -o name | while read job; do
+                    echo "Checking job: $job"
+                    # Get job creation time and check if older than 24h
+                    # Delete associated PVCs if older than 24h
+                  done
+                  
+                  echo "Cleanup completed"

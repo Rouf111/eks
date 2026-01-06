@@ -1,0 +1,59 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: eks-provisioner
+  namespace: eks-provisioner
+  labels:
+    app: eks-provisioner
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: eks-provisioner
+  namespace: eks-provisioner
+  labels:
+    app: eks-provisioner
+rules:
+  # Manage Jobs
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # Manage PVCs
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # Read Pods (for logs and status)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  
+  # Read Pod logs
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  
+  # Read Secrets (for AWS credentials)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: eks-provisioner
+  namespace: eks-provisioner
+  labels:
+    app: eks-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: eks-provisioner
+    namespace: eks-provisioner
+roleRef:
+  kind: Role
+  name: eks-provisioner
+  apiGroup: rbac.authorization.k8s.io

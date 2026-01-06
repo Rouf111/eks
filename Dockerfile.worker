@@ -1,0 +1,39 @@
+# Terraform Worker Dockerfile for EKS Cluster Provisioning
+FROM hashicorp/terraform:1.10
+
+# Install required dependencies
+RUN apk add --no-cache \
+    bash \
+    curl \
+    python3 \
+    py3-pip \
+    jq \
+    git \
+    && rm -rf /var/cache/apk/*
+
+# Install AWS CLI v2
+RUN apk add --no-cache \
+    aws-cli \
+    && rm -rf /var/cache/apk/*
+
+# Install kubectl
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && chmod +x kubectl \
+    && mv kubectl /usr/local/bin/
+
+# Set working directory
+WORKDIR /terraform-workspace
+
+# Copy Terraform files
+COPY main.tf variables.tf outputs.tf user-data.sh ./
+COPY k8s-manifests/ ./k8s-manifests/
+
+# Copy provisioning scripts
+COPY scripts/provision.sh scripts/destroy.sh ./
+RUN chmod +x provision.sh destroy.sh
+
+# Create directories for state and logs
+RUN mkdir -p /terraform-state /terraform-logs
+
+# Set default command
+CMD ["./provision.sh"]

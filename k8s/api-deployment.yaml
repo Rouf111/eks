@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eks-provisioner-api
+  namespace: eks-provisioner
+  labels:
+    app: eks-provisioner-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eks-provisioner-api
+  template:
+    metadata:
+      labels:
+        app: eks-provisioner-api
+    spec:
+      serviceAccountName: eks-provisioner
+      containers:
+        - name: api
+          image: eks-provisioner-api:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          env:
+            - name: WORKER_IMAGE
+              value: "eks-provisioner-worker:latest"
+            - name: STORAGE_CLASS
+              value: "gp2"  # Change to your storage class
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
