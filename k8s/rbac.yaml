@@ -21,6 +21,11 @@ rules:
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   
+  # Read Job status (required for status endpoint)
+  - apiGroups: ["batch"]
+    resources: ["jobs/status"]
+    verbs: ["get", "list", "watch"]
+  
   # Manage PVCs
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
