@@ -1,0 +1,105 @@
+name: Build and Deploy EKS Provisioner
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'api/**'
+      - 'scripts/**'
+      - 'Dockerfile.*'
+      - 'k8s/**'
+      - 'main.tf'
+      - 'variables.tf'
+      - 'outputs.tf'
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  LOCAL_REGISTRY: localhost:5000
+  WORKER_IMAGE: eks-provisioner-worker
+  API_IMAGE: eks-provisioner-api
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted  # This tells GitHub to use your VM runner
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Get timestamp for image tag
+      id: timestamp
+      run: echo "tag=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+
+    - name: Clean up old images
+      run: |
+        docker image rm -f ${{ env.LOCAL_REGISTRY }}/${{ env.WORKER_IMAGE }}:latest || true
+        docker image rm -f ${{ env.LOCAL_REGISTRY }}/${{ env.API_IMAGE }}:latest || true
+        docker image prune -f
+
+    - name: Build Worker image
+      run: |
+        docker build -f Dockerfile.worker \
+          -t ${{ env.LOCAL_REGISTRY }}/${{ env.WORKER_IMAGE }}:latest \
+          -t ${{ env.LOCAL_REGISTRY }}/${{ env.WORKER_IMAGE }}:${{ steps.timestamp.outputs.tag }} \
+          .
+
+    - name: Build API image
+      run: |
+        docker build -f Dockerfile.api \
+          -t ${{ env.LOCAL_REGISTRY }}/${{ env.API_IMAGE }}:latest \
+          -t ${{ env.LOCAL_REGISTRY }}/${{ env.API_IMAGE }}:${{ steps.timestamp.outputs.tag }} \
+          .
+
+    - name: Push images to local registry
+      run: |
+        docker push ${{ env.LOCAL_REGISTRY }}/${{ env.WORKER_IMAGE }}:latest
+        docker push ${{ env.LOCAL_REGISTRY }}/${{ env.WORKER_IMAGE }}:${{ steps.timestamp.outputs.tag }}
+        docker push ${{ env.LOCAL_REGISTRY }}/${{ env.API_IMAGE }}:latest
+        docker push ${{ env.LOCAL_REGISTRY }}/${{ env.API_IMAGE }}:${{ steps.timestamp.outputs.tag }}
+
+    - name: Update Kubernetes manifests
+      run: |
+        sed -i "s|image: .*eks-provisioner-api.*|image: ${{ env.LOCAL_REGISTRY }}/${{ env.API_IMAGE }}:${{ steps.timestamp.outputs.tag }}|g" k8s/api-deployment.yaml
+        sed -i "s|value: \".*eks-provisioner-worker.*\"|value: \"${{ env.LOCAL_REGISTRY }}/${{ env.WORKER_IMAGE }}:${{ steps.timestamp.outputs.tag }}\"|g" k8s/api-deployment.yaml
+
+    - name: Apply Kubernetes manifests
+      run: |
+        kubectl apply -f k8s/rbac.yaml
+        kubectl apply -f k8s/api-deployment.yaml
+
+    - name: Force pod restart
+      run: |
+        kubectl delete pods -n eks-provisioner -l app=eks-provisioner-api
+
+    - name: Wait for deployment rollout
+      run: |
+        kubectl rollout status deployment/eks-provisioner-api -n eks-provisioner --timeout=120s
+
+    - name: Verify deployment
+      run: |
+        echo "=== Pods ==="
+        kubectl get pods -n eks-provisioner
+        echo ""
+        echo "=== Service ==="
+        kubectl get svc -n eks-provisioner
+
+    - name: Health check
+      run: |
+        NODEPORT=$(kubectl get svc eks-provisioner-api -n eks-provisioner -o jsonpath='{.spec.ports[0].nodePort}')
+        NODE_IP=$(hostname -I | awk '{print $1}')
+        sleep 10
+        curl -f http://${NODE_IP}:${NODEPORT}/health
+
+    - name: Cleanup old images
+      run: |
+        docker image prune -f
+
+    - name: Deployment summary
+      run: |
+        NODEPORT=$(kubectl get svc eks-provisioner-api -n eks-provisioner -o jsonpath='{.spec.ports[0].nodePort}')
+        NODE_IP=$(hostname -I | awk '{print $1}')
+        echo "=== Deployment Complete ==="
+        echo "Worker Image: ${{ env.LOCAL_REGISTRY }}/${{ env.WORKER_IMAGE }}:${{ steps.timestamp.outputs.tag }}"
+        echo "API Image:    ${{ env.LOCAL_REGISTRY }}/${{ env.API_IMAGE }}:${{ steps.timestamp.outputs.tag }}"
+        echo "API Endpoint: http://${NODE_IP}:${NODEPORT}"
+        echo "Swagger UI:   http://${NODE_IP}:${NODEPORT}/docs"
