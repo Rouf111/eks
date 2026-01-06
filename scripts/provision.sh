@@ -90,7 +90,12 @@ log "terraform.tfvars generated successfully"
 # Initialize Terraform
 log "Initializing Terraform..."
 terraform init 2>&1 | tee /terraform-logs/init.log
- with proper error handling
+
+# Validate Terraform configuration
+log "Validating Terraform configuration..."
+terraform validate 2>&1 | tee /terraform-logs/validate.log
+
+# Run Terraform Plan with proper error handling
 log "Running Terraform plan..."
 set +e  # Temporarily disable exit on error to capture exit code
 terraform plan -out=tfplan -detailed-exitcode 2>&1 | tee /terraform-logs/plan.txt
