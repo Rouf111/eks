@@ -72,6 +72,7 @@ class ClusterResponse(BaseModel):
     """Response model for cluster operations"""
     cluster_name: str
     cluster_id: str = None
+    cluster_guid: str = None
     job_name: str
     status: str
     message: str = None
@@ -87,6 +88,7 @@ class ClusterStatus(BaseModel):
     phase: str = None
     message: str = None
     cluster_id: str = None
+    cluster_guid: str = None
     kubeconfig_command: str = None
 
 

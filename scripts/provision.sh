@@ -29,8 +29,7 @@ error_exit() {
 REQUIRED_VARS=("CLUSTER_NAME" "KUBERNETES_VERSION" "INSTANCE_TYPE" "IP_FAMILY")
 for var in "${REQUIRED_VARS[@]}"; do
     if [ -z "${!var}" ]; then
-        error "Required environment variable $var is not set"
-        exit 1
+        error_exit "Required environment variable $var is not set"
     fi
 done
 
@@ -106,11 +105,48 @@ set -e  # Re-enable exit on error
 # 0 = No changes needed
 # 1 = Error
 # 2 = Changes present
-if [ $PLAN_EXIT_CODE -eq 0 ]; then
+if [ $PLAN_EXIT_CODE -eq 1 ]; then
+    error_exit "Terraform plan failed. Check /terraform-logs/plan.txt for details"
+elif [ $PLAN_EXIT_CODE -eq 0 ]; then
     log "Plan succeeded: No changes needed"
+    STATUS="no_changes"
 elif [ $PLAN_EXIT_CODE -eq 2 ]; then
     log "Plan succeeded: Changes detected and ready to apply"
-elif [ $PLAN_EXIT_CODE -eq 1 ]; then
+    STATUS="changes_ready"
+else
+    error_exit "Unexpected plan exit code: $PLAN_EXIT_CODE"
+fi
+
+# Validate plan file exists
+if [ ! -f tfplan ]; then
+    error_exit "Terraform plan file not found. Plan may have failed."
+fi
+
+# Save plan in JSON format for easier parsing
+log "Saving plan in JSON format..."
+terraform show -json tfplan > /terraform-logs/plan.json 2>&1 || warn "Could not save plan in JSON format"
+
+# Check if we should apply (not dry-run AND changes are ready)
+if [ "$DRY_RUN" = "true" ]; then
+    log "Dry run mode enabled. Skipping terraform apply."
+    log "Plan has been saved. Review /terraform-logs/plan.txt for details."
+    
+    # Save dry run info
+    cat > /terraform-logs/cluster-info.json <<EOFINFO
+{
+  "cluster_name": "$CLUSTER_NAME",
+  "dry_run": true,
+  "status": "plan_completed",
+  "plan_file": "/terraform-logs/plan.txt"
+}
+EOFINFO
+    log "Script completed successfully"
+    exit 0
+fi
+
+# Apply changes if not in dry-run mode and changes are present
+if [ "$STATUS" = "changes_ready" ]; then
+    log "Dry run is disabled. Applying Terraform changes..."
     
     # Apply with error handling
     if ! terraform apply -auto-approve tfplan 2>&1 | tee /terraform-logs/apply.txt; then
@@ -130,19 +166,29 @@ elif [ $PLAN_EXIT_CODE -eq 1 ]; then
     
     # Extract key values
     CLUSTER_ID=$(terraform output -raw cluster_id 2>/dev/null || echo "")
+    CLUSTER_ARN=$(terraform output -raw cluster_arn 2>/dev/null || echo "")
     REGION=$(terraform output -raw aws_region 2>/dev/null || echo "$AWS_REGION")
     
     if [ -z "$CLUSTER_ID" ]; then
         error_exit "Failed to extract cluster ID from outputs"
     fi
     
+    # Extract cluster GUID from ARN (format: arn:aws:eks:region:account:cluster/name/GUID)
+    CLUSTER_GUID=""
+    if [ -n "$CLUSTER_ARN" ]; then
+        CLUSTER_GUID=$(echo "$CLUSTER_ARN" | grep -oP 'cluster/[^/]+/\K[a-f0-9-]+' || echo "")
+    fi
+    
     log "Cluster created successfully: $CLUSTER_ID"
+    [ -n "$CLUSTER_GUID" ] && log "Cluster GUID: $CLUSTER_GUID"
     
     # Save cluster info for API to retrieve
     cat > /terraform-logs/cluster-info.json <<EOFINFO
 {
   "cluster_name": "$CLUSTER_NAME",
   "cluster_id": "$CLUSTER_ID",
+  "cluster_arn": "$CLUSTER_ARN",
+  "cluster_guid": "$CLUSTER_GUID",
   "region": "$REGION",
   "kubeconfig_command": "aws eks update-kubeconfig --region $REGION --name $CLUSTER_ID",
   "status": "provisioned"
@@ -161,40 +207,22 @@ EOFINFO
     log ""
     log "=== Cluster Access Information ==="
     log "Cluster ID: $CLUSTER_ID"
+    [ -n "$CLUSTER_GUID" ] && log "Cluster GUID: $CLUSTER_GUID"
     log "Region: $REGION"
     log "Configure kubectl: aws eks update-kubeconfig --region $REGION --name $CLUSTER_ID"
     log ""
     log "NOTE: EBS StorageClass must be applied manually after configuring kubectl"
     log "      kubectl apply -f k8s-manifests/ebs-storageclass.yaml"
     
-else
-    log "Dry run mode enabled. Skipping terraform apply."
-    log "Plan has been saved. Review /terraform-logs/plan.txt for details."
+elif [ "$STATUS" = "no_changes" ]; then
+    log "No changes detected. Cluster may already exist or nothing to provision."
     
-    # Save dry run info
+    # Save info
     cat > /terraform-logs/cluster-info.json <<EOFINFO
 {
   "cluster_name": "$CLUSTER_NAME",
-  "dry_run": true,
-  "status": "plan_completed",
-  "plan_file": "/terraform-logs/plan.txt
-    
-    # Copy state files to persistent storage
-    log "Copying state files to persistent storage..."
-    mkdir -p "/terraform-state/$CLUSTER_NAME"
-    cp -r .terraform terraform.tfstate* tfplan "/terraform-state/$CLUSTER_NAME/" 2>&1 | tee -a /terraform-logs/apply.txt || warn "Could not copy all state files"
-    
-    log "EKS cluster provisioning completed successfully!"
-else
-    log "Dry run mode enabled. Skipping terraform apply."
-    log "Plan has been saved. Review /terraform-logs/plan.txt for details."
-    
-    # Save dry run info
-    cat > /terraform-logs/cluster-info.json <<EOFINFO
-{
-  "cluster_name": "$CLUSTER_NAME",
-  "dry_run": true,
-  "status": "plan_completed"
+  "status": "no_changes",
+  "message": "No infrastructure changes needed"
 }
 EOFINFO
 fi
