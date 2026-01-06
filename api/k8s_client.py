@@ -27,7 +27,7 @@ class KubernetesClient:
         
         # Configuration
         self.worker_image = os.getenv("WORKER_IMAGE", "eks-provisioner-worker:latest")
-        self.storage_class = os.getenv("STORAGE_CLASS", "gp2")
+        self.storage_class = os.getenv("STORAGE_CLASS", "nfs-client")
     
     def create_pvcs(self, cluster_name: str) -> Tuple[str, str]:
         """Create PVCs for Terraform state and logs"""
@@ -44,7 +44,7 @@ class KubernetesClient:
                 }
             ),
             spec=client.V1PersistentVolumeClaimSpec(
-                access_modes=["ReadWriteOnce"],
+                access_modes=["ReadWriteMany"],
                 resources=client.V1ResourceRequirements(
                     requests={"storage": "1Gi"}
                 ),
@@ -62,7 +62,7 @@ class KubernetesClient:
                 }
             ),
             spec=client.V1PersistentVolumeClaimSpec(
-                access_modes=["ReadWriteOnce"],
+                access_modes=["ReadWriteMany"],
                 resources=client.V1ResourceRequirements(
                     requests={"storage": "500Mi"}
                 ),

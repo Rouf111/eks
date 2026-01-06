@@ -6,11 +6,12 @@ metadata:
   labels:
     app: eks-provisioner-api
 spec:
-  type: LoadBalancer  # Change to ClusterIP if using Ingress
+  type: NodePort
   selector:
     app: eks-provisioner-api
   ports:
     - protocol: TCP
       port: 80
       targetPort: 8000
+      nodePort: 30800
       name: http
