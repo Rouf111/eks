@@ -4,7 +4,7 @@ from datetime import datetime
 import logging
 import json
 
-from models import ClusterRequest, ClusterResponse, ClusterStatus, ClusterLogs
+from models import ClusterRequest, ClusterResponse, ClusterStatus, ClusterLogs, ClusterInfo, ClusterListResponse
 from k8s_client import KubernetesClient
 
 # Configure logging
@@ -155,24 +155,15 @@ async def get_cluster_status(cluster_name: str):
             job_name=found_job,
             status=job_status["status"],
             phase=job_status["phase"],
-            message=job_status.get("message")
+            message=job_status.get("message", ""),
+            cluster_id=job_status.get("cluster_id"),
+            cluster_guid=job_status.get("cluster_guid"),
+            cluster_arn=job_status.get("cluster_arn")
         )
         
-        # If job completed successfully and it was a provision job, try to get cluster info
-        if job_status["status"] == "completed" and "provision-" in found_job:
-            try:
-                # Try to read cluster info from logs
-                cluster_info = k8s_client.get_logs(cluster_name, "cluster-info.json")
-                if cluster_info and cluster_info != "No pods found for this cluster":
-                    # Parse if it's JSON
-                    try:
-                        info = json.loads(cluster_info) if "{" in cluster_info else {}
-                        response.cluster_id = info.get("cluster_id")
-                        response.kubeconfig_command = info.get("kubeconfig_command")
-                    except:
-                        pass
-            except:
-                pass
+        # Set kubeconfig command if cluster_id and region available
+        if response.cluster_id and job_status.get("region"):
+            response.kubeconfig_command = f"aws eks update-kubeconfig --region {job_status['region']} --name {response.cluster_id}"
         
         return response
     
@@ -211,21 +202,21 @@ async def get_cluster_logs(cluster_name: str):
         )
 
 
-@app.delete("/clusters/{cluster_id}", response_model=ClusterResponse)
-async def destroy_cluster(cluster_id: str):
+@app.delete("/clusters/{cluster_name}", response_model=ClusterResponse)
+async def destroy_cluster(cluster_name: str):
     """
     Destroy an EKS cluster by running terraform destroy.
-    Requires cluster_id (which is typically the cluster_name).
+    Uses the cluster_name to locate and destroy the cluster.
     """
-    logger.info(f"Received destroy request for cluster: {cluster_id}")
+    logger.info(f"Received destroy request for cluster: {cluster_name}")
     
     try:
         # Create destroy job
-        job_name = k8s_client.create_destroy_job(cluster_name=cluster_id)
+        job_name = k8s_client.create_destroy_job(cluster_name=cluster_name)
         
         return ClusterResponse(
-            cluster_name=cluster_id,
-            cluster_id=cluster_id,
+            cluster_name=cluster_name,
+            cluster_id=cluster_name,
             job_name=job_name,
             status="pending",
             message="Destroy job created. This will take several minutes. Check status endpoint for progress."
@@ -239,6 +230,90 @@ async def destroy_cluster(cluster_id: str):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create destroy job: {str(e)}"
+        )
+
+
+@app.get("/clusters", response_model=ClusterListResponse)
+async def list_clusters():
+    """
+    List all EKS clusters managed by this provisioner.
+    Returns cluster name, ID, provider, version, region, and status.
+    """
+    logger.info("Received list clusters request")
+    
+    try:
+        clusters_list = []
+        
+        # Get all jobs for eks-provisioner
+        jobs = k8s_client.batch_v1.list_namespaced_job(
+            namespace=k8s_client.namespace,
+            label_selector="app=eks-provisioner"
+        )
+        
+        # Group jobs by cluster name
+        cluster_jobs = {}
+        for job in jobs.items:
+            cluster_name = job.metadata.labels.get("cluster", "")
+            if cluster_name:
+                if cluster_name not in cluster_jobs:
+                    cluster_jobs[cluster_name] = []
+                cluster_jobs[cluster_name].append(job)
+        
+        # Process each cluster
+        for cluster_name, jobs_list in cluster_jobs.items():
+            # Get the most recent job
+            latest_job = sorted(jobs_list, key=lambda x: x.metadata.creation_timestamp, reverse=True)[0]
+            
+            # Determine operation type
+            operation = "provision"
+            if "destroy" in latest_job.metadata.name:
+                operation = "destroy"
+            
+            # Get job status
+            job_status = k8s_client.get_job_status(latest_job.metadata.name)
+            
+            # Parse cluster info from logs if available
+            cluster_id = job_status.get("cluster_id", cluster_name)
+            cluster_guid = job_status.get("cluster_guid")
+            region = job_status.get("region", "ap-south-1")
+            k8s_version = None
+            instance_type = None
+            
+            # Try to extract from job environment variables
+            if latest_job.spec.template.spec.containers:
+                env_vars = latest_job.spec.template.spec.containers[0].env or []
+                for env in env_vars:
+                    if env.name == "KUBERNETES_VERSION":
+                        k8s_version = env.value
+                    elif env.name == "INSTANCE_TYPE":
+                        instance_type = env.value
+            
+            cluster_info = ClusterInfo(
+                cluster_name=cluster_name,
+                cluster_id=cluster_id,
+                cluster_guid=cluster_guid,
+                provider="AWS EKS",
+                kubernetes_version=k8s_version,
+                instance_type=instance_type,
+                region=region,
+                status=job_status["status"],
+                phase=job_status["phase"],
+                created_at=latest_job.metadata.creation_timestamp.isoformat() if latest_job.metadata.creation_timestamp else None,
+                last_operation=operation
+            )
+            
+            clusters_list.append(cluster_info)
+        
+        return ClusterListResponse(
+            total=len(clusters_list),
+            clusters=clusters_list
+        )
+    
+    except Exception as e:
+        logger.error(f"Error listing clusters: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list clusters: {str(e)}"
         )
 
 

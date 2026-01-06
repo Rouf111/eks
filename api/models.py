@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
 import re
-from typing import Literal
+from typing import Literal, Optional, List
 
 
 class ClusterRequest(BaseModel):
@@ -85,11 +85,12 @@ class ClusterStatus(BaseModel):
     cluster_name: str
     job_name: str
     status: str
-    phase: str = None
-    message: str = None
-    cluster_id: str = None
-    cluster_guid: str = None
-    kubeconfig_command: str = None
+    phase: str
+    message: str = ""
+    cluster_id: Optional[str] = None
+    cluster_guid: Optional[str] = None
+    cluster_arn: Optional[str] = None
+    kubeconfig_command: Optional[str] = None
 
 
 class ClusterLogs(BaseModel):
@@ -97,3 +98,24 @@ class ClusterLogs(BaseModel):
     cluster_name: str
     logs: str
     log_type: str = "terraform"
+
+
+class ClusterInfo(BaseModel):
+    """Response model for cluster list item"""
+    cluster_name: str
+    cluster_id: Optional[str] = None
+    cluster_guid: Optional[str] = None
+    provider: str = "AWS EKS"
+    kubernetes_version: Optional[str] = None
+    instance_type: Optional[str] = None
+    region: Optional[str] = None
+    status: str
+    phase: str
+    created_at: Optional[str] = None
+    last_operation: str  # provision or destroy
+
+
+class ClusterListResponse(BaseModel):
+    """Response model for cluster list"""
+    total: int
+    clusters: List[ClusterInfo]
