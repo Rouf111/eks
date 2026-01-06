@@ -20,6 +20,11 @@ warn() {
     echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARNING:${NC} $1"
 }
 
+error_exit() {
+    error "$1"
+    exit 1
+}
+
 # Validate required environment variables
 REQUIRED_VARS=("CLUSTER_NAME" "KUBERNETES_VERSION" "INSTANCE_TYPE" "IP_FAMILY")
 for var in "${REQUIRED_VARS[@]}"; do
@@ -85,56 +90,89 @@ log "terraform.tfvars generated successfully"
 # Initialize Terraform
 log "Initializing Terraform..."
 terraform init 2>&1 | tee /terraform-logs/init.log
-
-# Validate Terraform configuration
-log "Validating Terraform configuration..."
-terraform validate 2>&1 | tee /terraform-logs/validate.log
-
-# Run Terraform Plan
+ with proper error handling
 log "Running Terraform plan..."
-terraform plan -out=tfplan 2>&1 | tee /terraform-logs/plan.txt
+set +e  # Temporarily disable exit on error to capture exit code
+terraform plan -out=tfplan -detailed-exitcode 2>&1 | tee /terraform-logs/plan.txt
+PLAN_EXIT_CODE=${PIPESTATUS[0]}
+set -e  # Re-enable exit on error
 
-# Save plan in JSON format for easier parsing
-log "Saving plan in JSON format..."
-terraform show -json tfplan > /terraform-logs/plan.json 2>&1 || warn "Could not save plan as JSON"
-
-# Conditional Apply
-if [ "$DRY_RUN" = "false" ]; then
-    log "Dry run is disabled. Applying Terraform changes..."
-    terraform apply -auto-approve tfplan 2>&1 | tee /terraform-logs/apply.txt
+# Handle plan exit codes:
+# 0 = No changes needed
+# 1 = Error
+# 2 = Changes present
+if [ $PLAN_EXIT_CODE -eq 0 ]; then
+    log "Plan succeeded: No changes needed"
+elif [ $PLAN_EXIT_CODE -eq 2 ]; then
+    log "Plan succeeded: Changes detected and ready to apply"
+elif [ $PLAN_EXIT_CODE -eq 1 ]; then
+    
+    # Apply with error handling
+    if ! terraform apply -auto-approve tfplan 2>&1 | tee /terraform-logs/apply.txt; then
+        error_exit "Terraform apply failed. Check /terraform-logs/apply.txt for details"
+    fi
     
     # Extract outputs
     log "Extracting Terraform outputs..."
-    terraform output -json > /terraform-logs/outputs.json 2>&1 || warn "Could not extract outputs"
+    if ! terraform output -json > /terraform-logs/outputs.json 2>&1; then
+        error_exit "Failed to extract Terraform outputs"
+    fi
+    
+    # Verify outputs exist
+    if [ ! -s /terraform-logs/outputs.json ]; then
+        error_exit "No outputs generated. Cluster may not have been created successfully"
+    fi
     
     # Extract key values
     CLUSTER_ID=$(terraform output -raw cluster_id 2>/dev/null || echo "")
-    REGION=$(terraform output -raw region 2>/dev/null || echo "$AWS_REGION")
+    REGION=$(terraform output -raw aws_region 2>/dev/null || echo "$AWS_REGION")
     
-    if [ -n "$CLUSTER_ID" ]; then
-        log "Cluster created successfully: $CLUSTER_ID"
-        
-        # Update kubeconfig
-        log "Updating kubeconfig..."
-        aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_ID" 2>&1 | tee /terraform-logs/kubeconfig.log
-        
-        # Apply EBS StorageClass
-        log "Applying EBS StorageClass..."
-        kubectl apply -f k8s-manifests/ebs-storageclass.yaml 2>&1 | tee /terraform-logs/storageclass.log || warn "Could not apply StorageClass"
-        
-        # Save cluster info
-        cat > /terraform-logs/cluster-info.json <<EOFINFO
+    if [ -z "$CLUSTER_ID" ]; then
+        error_exit "Failed to extract cluster ID from outputs"
+    fi
+    
+    log "Cluster created successfully: $CLUSTER_ID"
+    
+    # Save cluster info for API to retrieve
+    cat > /terraform-logs/cluster-info.json <<EOFINFO
 {
   "cluster_name": "$CLUSTER_NAME",
   "cluster_id": "$CLUSTER_ID",
   "region": "$REGION",
-  "kubeconfig_command": "aws eks update-kubeconfig --region $REGION --name $CLUSTER_ID"
+  "kubeconfig_command": "aws eks update-kubeconfig --region $REGION --name $CLUSTER_ID",
+  "status": "provisioned"
 }
 EOFINFO
-        log "Cluster information saved to cluster-info.json"
-    else
-        error "Failed to extract cluster ID from outputs"
+    log "Cluster information saved to cluster-info.json"
+    
+    # Copy state files to persistent storage
+    log "Copying state files to persistent storage..."
+    mkdir -p "/terraform-state/$CLUSTER_NAME"
+    if ! cp -r .terraform terraform.tfstate* tfplan "/terraform-state/$CLUSTER_NAME/" 2>&1 | tee -a /terraform-logs/copy-state.log; then
+        warn "Could not copy all state files"
     fi
+    
+    log "EKS cluster provisioning completed successfully!"
+    log ""
+    log "=== Cluster Access Information ==="
+    log "Cluster ID: $CLUSTER_ID"
+    log "Region: $REGION"
+    log "Configure kubectl: aws eks update-kubeconfig --region $REGION --name $CLUSTER_ID"
+    log ""
+    log "NOTE: EBS StorageClass must be applied manually after configuring kubectl"
+    log "      kubectl apply -f k8s-manifests/ebs-storageclass.yaml"
+    
+else
+    log "Dry run mode enabled. Skipping terraform apply."
+    log "Plan has been saved. Review /terraform-logs/plan.txt for details."
+    
+    # Save dry run info
+    cat > /terraform-logs/cluster-info.json <<EOFINFO
+{
+  "cluster_name": "$CLUSTER_NAME",
+  "dry_run": true,
+  "status": "plan_completed",
+  "plan_file": "/terraform-logs/plan.txt
     
     # Copy state files to persistent storage
     log "Copying state files to persistent storage..."
